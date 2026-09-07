@@ -87,14 +87,22 @@ class Signer:
 
 
 def to_ascii(s: str) -> str:
+    """Escape every non-ASCII character to \\uXXXX matching JavaScript UTF-16 code units.
+
+    For characters outside the BMP (astral plane, U+10000+), JavaScript's /[\u0080-\uffff]/g
+    matches individual UTF-16 surrogate code units, producing surrogate pairs \\uD8xx\\uDCxx.
+    Encoding to UTF-16-BE yields exact 16-bit code units byte-identical to JS charCodeAt.
+    """
     res = []
-    for ch in s:
-        code = ord(ch)
-        if code >= 0x80:
-            res.append(f"\\u{code:04x}")
+    u16_bytes = s.encode("utf-16-be")
+    for i in range(0, len(u16_bytes), 2):
+        code_unit = (u16_bytes[i] << 8) | u16_bytes[i + 1]
+        if code_unit >= 0x80:
+            res.append(f"\\u{code_unit:04x}")
         else:
-            res.append(ch)
+            res.append(chr(code_unit))
     return "".join(res)
+
 
 
 def canonical_json(val: Any) -> str:

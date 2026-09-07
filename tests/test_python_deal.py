@@ -44,6 +44,52 @@ def test_canonical_json_ordering_and_escapes():
     assert "\\u20ac" in ascii_form
 
 
+def test_astral_unicode_surrogate_escapes_and_vectors():
+    # 1. BMP escape check (€ -> \u20ac)
+    assert to_ascii("€") == "\\u20ac"
+
+    # 2. Astral plane escape check (U+1F600 😀 -> \ud83d\ude00 surrogate pair)
+    assert to_ascii("\U0001f600") == "\\ud83d\\ude00"
+    assert to_ascii("task-😀-test") == "task-\\ud83d\\ude00-test"
+
+    # 3. Cross-language regression vector: pins offer_id and contract_id for astral character
+    # to exact byte parity with TypeScript reference implementation
+    payer_did = "did:key:z6Mk" + "f" * 44
+    payee_did = "did:key:z6Mk" + "g" * 44
+    astral_offer_fields = {
+        "amount": "100",
+        "asset": "FLOP",
+        "claimByMs": 1756703600000,
+        "expiresMs": 1756700600000,
+        "from": payer_did,
+        "job": {"proto": "a2a", "id": "task-\U0001f600-test"},
+        "lock": "hash",
+        "nonce": "9f2c81d04c9e1f7a",
+        "rails": ["flop-htlc"],
+        "refundAfterMs": 1756707200000,
+        "role": "payer",
+        "type": "offer",
+    }
+
+    # Expected offer id matches domainHash("offer", canonicalJson(astral_offer_fields)) in TypeScript
+    expected_offer_id = "0x3bd7a25a283dd9bb4d7367485f5cbb3a1434091a4aa575fd9c2f33401bb6b88f"
+    oid = offer_id(astral_offer_fields)
+    assert oid == expected_offer_id
+
+    # Expected contract id matches domainHash("contract", canonicalJson({accept, offer})) in TypeScript
+    astral_offer = dict(astral_offer_fields, id=oid)
+    astral_accept_core = {
+        "from": payee_did,
+        "nonce": "0011223344556677",
+        "ref": oid,
+        "statement": "0x" + "ab" * 32,
+    }
+    expected_contract_id = "0x1280c666ff06c4396ffd1764a0ffacc807e1cf20e9112c568f52ff82a03036cc"
+    cid = contract_id(astral_offer, astral_accept_core)
+    assert cid == expected_contract_id
+
+
+
 def test_deterministic_domain_hashes():
     fields = {
         "amount": "1000",
