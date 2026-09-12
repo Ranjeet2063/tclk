@@ -184,6 +184,42 @@ def encode_paper_record(
     return head if secret is None else f"{head} {secret}"
 
 
+def decode_paper_record(value: str) -> Optional[Dict[str, Any]]:
+    parts = value.split(" ")
+    if len(parts) < 5 or len(parts) > 6:
+        return None
+    prefix, status, lock, statement, refund_after = parts[:5]
+    secret = parts[5] if len(parts) == 6 else None
+    if prefix != PAPER_RECORD_PREFIX:
+        return None
+    if status not in ("locked", "claimed", "refunded"):
+        return None
+    if lock not in ("hash", "point"):
+        return None
+    if not (statement.startswith("0x") and len(statement) == 66 and all(c in "0123456789abcdefABCDEF" for c in statement[2:])):
+        return None
+    try:
+        refund_after_ms = int(refund_after)
+        if refund_after_ms <= 0:
+            return None
+    except ValueError:
+        return None
+    if secret is not None:
+        if not (secret.startswith("0x") and len(secret) == 66 and all(c in "0123456789abcdefABCDEF" for c in secret[2:])):
+            return None
+    if (status == "claimed") != (secret is not None):
+        return None
+    rec: Dict[str, Any] = {
+        "status": status,
+        "lock": lock,
+        "statement": statement,
+        "refundAfterMs": refund_after_ms,
+    }
+    if secret is not None:
+        rec["secret"] = secret
+    return rec
+
+
 # Transport utilities
 def post_signed_message(signer: Signer, room: str, frame: Dict[str, Any]) -> Dict[str, Any]:
     text = encode_frame(frame)
@@ -275,7 +311,8 @@ def main():
     task_id = f"{job['platform']}-{secrets.token_hex(4)}"
     spec_note = {"ns": f"tclk-job-{task_id[-2:]}", "key": task_id[:14]}
     spec = f"{job['platform']} {job['deliverable']} | checkable: {'; '.join(job['checkable'])}"
-    notes.set(spec_note["ns"], spec_note["key"], spec, {"ifAbsent": True})
+    if not notes.set(spec_note["ns"], spec_note["key"], spec, {"ifAbsent": True}):
+        raise RuntimeError(f"Conditional write failed for job spec note /kv/{spec_note['ns']}/{spec_note['key']}")
     log(0, f"job spec   /kv/{spec_note['ns']}/{spec_note['key']}")
     log("", f"           {spec}")
 
@@ -319,11 +356,13 @@ def main():
     log("", f"deal room  /r/{room}")
     log("", f"state note /kv/{sn['ns']}/{sn['key']}")
 
-    notes.set(sn["ns"], sn["key"], state_note_value("accepted"), {"ifAbsent": True})
+    if not notes.set(sn["ns"], sn["key"], state_note_value("accepted"), {"ifAbsent": True}):
+        raise RuntimeError(f"Conditional write failed for accepted state note /kv/{sn['ns']}/{sn['key']}")
 
     # 3 — Payer locks on Paper rail
     record = encode_paper_record("locked", "hash", statement, offer["refundAfterMs"])
-    notes.set(pn["ns"], pn["key"], record, {"ifAbsent": True})
+    if not notes.set(pn["ns"], pn["key"], record, {"ifAbsent": True}):
+        raise RuntimeError(f"Conditional write failed for paper lock note /kv/{pn['ns']}/{pn['key']}")
 
     lock_frame = {
         "type": "lock",
@@ -337,10 +376,23 @@ def main():
 
     # Payee verifies lock on rail
     held = notes.get(pn["ns"], pn["key"])
-    if not held or "locked" not in held:
-        raise RuntimeError("Rail does not hold the lock")
+    if not held:
+        raise RuntimeError("Rail does not hold the lock note")
+    parsed_held = decode_paper_record(held)
+    if not parsed_held:
+        raise RuntimeError(f"Unreadable paper record on rail: {held!r}")
+    if (
+        parsed_held.get("status") != "locked"
+        or parsed_held.get("lock") != "hash"
+        or parsed_held.get("statement") != statement
+        or parsed_held.get("refundAfterMs") != offer["refundAfterMs"]
+    ):
+        raise RuntimeError(
+            f"Rail record does not match expected terms. Expected locked/hash/{statement}/{offer['refundAfterMs']}, got: {parsed_held}"
+        )
     log("", "payee checked rail record -> verified locked")
-    notes.set(sn["ns"], sn["key"], state_note_value("locked", accept["contract"]), {"if": state_note_value("accepted")})
+    if not notes.set(sn["ns"], sn["key"], state_note_value("locked", accept["contract"]), {"if": state_note_value("accepted")}):
+        raise RuntimeError(f"Conditional write failed for locked state note /kv/{sn['ns']}/{sn['key']}")
 
     # 4 — Payee reveals secret
     reveal_frame = {
@@ -351,9 +403,11 @@ def main():
     }
     post_signed_message(payee, room, reveal_frame)
     claimed_rec = encode_paper_record("claimed", "hash", statement, offer["refundAfterMs"], preimage)
-    notes.set(pn["ns"], pn["key"], claimed_rec, {"if": record})
+    if not notes.set(pn["ns"], pn["key"], claimed_rec, {"if": record}):
+        raise RuntimeError(f"Conditional write failed for claimed paper note /kv/{pn['ns']}/{pn['key']}")
     log(4, "reveal     secret published, rail record -> claimed")
-    notes.set(sn["ns"], sn["key"], state_note_value("claimed", accept["contract"]), {"if": state_note_value("locked", accept["contract"])})
+    if not notes.set(sn["ns"], sn["key"], state_note_value("claimed", accept["contract"]), {"if": state_note_value("locked", accept["contract"])}):
+        raise RuntimeError(f"Conditional write failed for claimed state note /kv/{sn['ns']}/{sn['key']}")
 
     # 5 — Third-Party Verification
     print()

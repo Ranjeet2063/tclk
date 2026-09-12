@@ -13,6 +13,7 @@ from examples.python_live_deal import (
     canonical_json,
     contract_id,
     deal_room,
+    decode_paper_record,
     domain_hash,
     encode_frame,
     encode_paper_record,
@@ -136,6 +137,58 @@ def test_technocore_naming_helpers():
     assert state_note(cid) == {"ns": "tclk-aa", "key": "a" * 14}
     assert paper_note(cid) == {"ns": "tclk-paper-aa", "key": "a" * 14}
     assert state_note_value("locked", "ref123") == "locked ref123"
+
+
+def test_decode_paper_record():
+    valid_locked = "tclkpaper1 locked hash 0x" + "a" * 64 + " 1700000000"
+    rec = decode_paper_record(valid_locked)
+    assert rec is not None
+    assert rec["status"] == "locked"
+    assert rec["lock"] == "hash"
+    assert rec["statement"] == "0x" + "a" * 64
+    assert rec["refundAfterMs"] == 1700000000
+    assert "secret" not in rec
+
+    valid_claimed = "tclkpaper1 claimed hash 0x" + "a" * 64 + " 1700000000 0x" + "b" * 64
+    rec_c = decode_paper_record(valid_claimed)
+    assert rec_c is not None
+    assert rec_c["status"] == "claimed"
+    assert rec_c["secret"] == "0x" + "b" * 64
+
+    # Rejection of malformed / untrusted inputs
+    assert decode_paper_record("unlocked attacker-controlled text") is None
+    assert decode_paper_record("tclkpaper1 attacker hash 0x" + "a" * 64 + " 1000") is None
+    assert decode_paper_record("invalid-prefix locked hash 0x" + "a" * 64 + " 1000") is None
+    assert decode_paper_record("tclkpaper1 locked invalid_lock 0x" + "a" * 64 + " 1000") is None
+    assert decode_paper_record("tclkpaper1 locked hash not_a_hex_statement 1000") is None
+    assert decode_paper_record("tclkpaper1 locked hash 0x" + "a" * 64 + " -500") is None
+    assert decode_paper_record("tclkpaper1 claimed hash 0x" + "a" * 64 + " 1000") is None
+
+
+def test_fail_closed_on_untrusted_rail():
+    statement = "0x" + "2" * 64
+    deadline = 1756707200000
+
+    attacker_values = [
+        "unlocked attacker-controlled text",
+        "tclkpaper1 locked hash " + ("0x" + "3" * 64) + f" {deadline}",
+        "tclkpaper1 locked hash " + statement + " 9999",
+        "tclkpaper1 claimed hash " + statement + f" {deadline} " + ("0x" + "1" * 64),
+        "locked",
+        "some random locked string",
+        "",
+    ]
+
+    for untrusted in attacker_values:
+        parsed = decode_paper_record(untrusted) if untrusted else None
+        is_valid = (
+            parsed is not None
+            and parsed.get("status") == "locked"
+            and parsed.get("lock") == "hash"
+            and parsed.get("statement") == statement
+            and parsed.get("refundAfterMs") == deadline
+        )
+        assert is_valid is False, f"Untrusted rail text unexpectedly verified: {untrusted}"
 
 
 if __name__ == "__main__":
